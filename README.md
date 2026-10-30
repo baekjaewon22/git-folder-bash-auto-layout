@@ -8,6 +8,7 @@ Windows utility that scans the subfolders in `%USERPROFILE%\git`, lets you selec
 - Opens a Git Bash window in each selected folder
 - Per-folder AI selector (`claude` / `codex`) that is launched inside each Git Bash window
 - Window title shows `folder  |  ai` and is kept fixed while the launcher stays open
+- **기본저장** saves both the per-folder AI choice and the checked folders, restored on next launch
 - Automatically calculates a full-screen grid based on the number of selected folders
 - Supports selecting a different workspace directory
 - Can create a desktop shortcut from inside the application

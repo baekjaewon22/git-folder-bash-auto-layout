@@ -103,6 +103,7 @@ namespace GitFolderBashLauncher
         private readonly Dictionary<IntPtr, string> lockedTitles = new Dictionary<IntPtr, string>();
         private readonly System.Windows.Forms.Timer titleTimer = new System.Windows.Forms.Timer { Interval = 700 };
         private readonly float scale = 1f;
+        private string loadedRoot;
 
         internal MainForm()
         {
@@ -169,7 +170,7 @@ namespace GitFolderBashLauncher
             selectedCount.ForeColor = MutedColor;
             selectedCount.Margin = new Padding(S(8), 0, 0, 0);
             toolbar.Controls.Add(selectedCount, 2, 0);
-            toolbar.Controls.Add(MakeButton("AI 선택 기본저장", SaveAiDefaults), 3, 0);
+            toolbar.Controls.Add(MakeButton("기본저장", SaveDefaults), 3, 0);
             layout.Controls.Add(toolbar, 0, 2);
 
             // 폴더 목록 (1px 테두리 안에 스크롤 목록)
@@ -246,6 +247,7 @@ namespace GitFolderBashLauncher
 
         private string SettingsFile { get { return Path.Combine(SettingsFolder, "root.txt"); } }
         private string AiSettingsFile { get { return Path.Combine(SettingsFolder, "ai.txt"); } }
+        private string CheckedSettingsFile { get { return Path.Combine(SettingsFolder, "checked.txt"); } }
 
         private Dictionary<string, string> LoadAiChoices()
         {
@@ -265,12 +267,44 @@ namespace GitFolderBashLauncher
             return result;
         }
 
-        private void SaveAiDefaults(object sender, EventArgs e)
+        // 기본저장: 폴더별 AI 선택과 체크 상태를 함께 저장해 다음 실행 때 그대로 불러온다.
+        private void SaveDefaults(object sender, EventArgs e)
         {
-            if (SaveAiChoices())
-                status.Text = string.Format("AI 선택값 {0}개를 저장했습니다. 다음 실행 때 이 값으로 표시됩니다.", rows.Count);
+            if (SaveAiChoices() && SaveCheckedFolders())
+                status.Text = string.Format("기본값을 저장했습니다: 체크 {0}개, AI 선택 {1}개. 다음 실행 때 이 상태로 표시됩니다.",
+                    rows.Count(r => r.Check.Checked), rows.Count);
             else
-                MessageBox.Show("AI 선택값을 저장하지 못했습니다.", "저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("기본값을 저장하지 못했습니다.", "저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private HashSet<string> LoadCheckedFolders()
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(CheckedSettingsFile)) return result;
+                foreach (string line in File.ReadAllLines(CheckedSettingsFile, Encoding.UTF8))
+                    if (line.Trim().Length > 0) result.Add(line.Trim());
+            }
+            catch { }
+            return result;
+        }
+
+        private bool SaveCheckedFolders()
+        {
+            // 다른 Git 상위 폴더에서 저장한 체크는 유지하고, 지금 목록에 있는 폴더만 갱신한다.
+            var saved = LoadCheckedFolders();
+            foreach (FolderRow row in rows)
+            {
+                if (row.Check.Checked) saved.Add(row.Item.FullPath);
+                else saved.Remove(row.Item.FullPath);
+            }
+            try
+            {
+                File.WriteAllLines(CheckedSettingsFile, saved.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray(), new UTF8Encoding(false));
+                return true;
+            }
+            catch { return false; }
         }
 
         private bool SaveAiChoices()
@@ -321,8 +355,11 @@ namespace GitFolderBashLauncher
         private void LoadFolders()
         {
             string root = rootPath.Text.Trim();
-            // 새로고침해도 체크해 둔 폴더는 유지한다.
-            var wasChecked = new HashSet<string>(rows.Where(r => r.Check.Checked).Select(r => r.Item.FullPath), StringComparer.OrdinalIgnoreCase);
+            // 같은 폴더를 새로고침하면 지금 체크 상태를 유지하고, 처음 열거나 상위 폴더가 바뀌면 저장된 체크를 불러온다.
+            var wasChecked = string.Equals(loadedRoot, root, StringComparison.OrdinalIgnoreCase)
+                ? new HashSet<string>(rows.Where(r => r.Check.Checked).Select(r => r.Item.FullPath), StringComparer.OrdinalIgnoreCase)
+                : LoadCheckedFolders();
+            loadedRoot = root;
             ClearRows();
             if (!Directory.Exists(root))
             {
