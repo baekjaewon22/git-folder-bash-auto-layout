@@ -43,6 +43,12 @@ namespace GitFolderBashLauncher
         [DllImport("user32.dll")]
         internal static extern bool SetProcessDPIAware();
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        internal static extern bool SetWindowText(IntPtr hWnd, string text);
+
+        [DllImport("user32.dll")]
+        internal static extern bool IsWindow(IntPtr hWnd);
+
         internal const int SW_RESTORE = 9;
         internal const uint SWP_NOZORDER = 0x0004;
         internal const uint SWP_SHOWWINDOW = 0x0040;
@@ -79,11 +85,15 @@ namespace GitFolderBashLauncher
         private static readonly string DefaultGitFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "git");
         private const string DefaultGitBash = @"C:\Program Files\Git\git-bash.exe";
+        private const string Mintty = @"C:\Program Files\Git\usr\bin\mintty.exe";
+        private static readonly string[] AiTools = { "claude", "codex" };
 
         private readonly TextBox rootPath = new TextBox();
-        private readonly CheckedListBox folders = new CheckedListBox();
+        private readonly DataGridView folders = new DataGridView();
         private readonly Label status = new Label();
         private readonly Button runButton = new Button();
+        private readonly Dictionary<IntPtr, string> lockedTitles = new Dictionary<IntPtr, string>();
+        private readonly System.Windows.Forms.Timer titleTimer = new System.Windows.Forms.Timer { Interval = 700 };
 
         internal MainForm()
         {
@@ -99,7 +109,7 @@ namespace GitFolderBashLauncher
                 Height = 72,
                 Padding = new Padding(14, 12, 14, 0),
                 Font = new Font("Malgun Gothic", 11F, FontStyle.Bold),
-                Text = "실행할 Git 작업 폴더를 선택하세요.\r\n선택한 폴더마다 Git Bash를 열고 화면 전체에 자동 배치합니다."
+                Text = "실행할 Git 작업 폴더와 AI(claude / codex)를 선택하세요.\r\n선택한 폴더마다 Git Bash에서 AI를 실행하고 화면 전체에 자동 배치합니다."
             };
 
             var pathPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 48, ColumnCount = 4, Padding = new Padding(10, 7, 10, 5) };
@@ -115,14 +125,35 @@ namespace GitFolderBashLauncher
             pathPanel.Controls.Add(MakeButton("새로고침", delegate { LoadFolders(); }), 3, 0);
 
             folders.Dock = DockStyle.Fill;
-            folders.CheckOnClick = true;
-            folders.HorizontalScrollbar = true;
-            folders.IntegralHeight = false;
             folders.BorderStyle = BorderStyle.FixedSingle;
+            folders.BackgroundColor = SystemColors.Window;
+            folders.AllowUserToAddRows = false;
+            folders.AllowUserToDeleteRows = false;
+            folders.AllowUserToResizeRows = false;
+            folders.RowHeadersVisible = false;
+            folders.SelectionMode = DataGridViewSelectionMode.CellSelect;
+            folders.EditMode = DataGridViewEditMode.EditOnEnter;
+            folders.RowTemplate.Height = 28;
+            folders.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Run", HeaderText = "실행", Width = 48 });
+            folders.Columns.Add(new DataGridViewTextBoxColumn { Name = "Folder", HeaderText = "폴더", ReadOnly = true, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+            var aiColumn = new DataGridViewComboBoxColumn { Name = "Ai", HeaderText = "AI", Width = 110, FlatStyle = FlatStyle.Flat };
+            aiColumn.Items.AddRange(AiTools);
+            folders.Columns.Add(aiColumn);
+            folders.CurrentCellDirtyStateChanged += delegate
+            {
+                if (folders.IsCurrentCellDirty) folders.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            };
+            titleTimer.Tick += delegate { EnforceTitles(); };
 
             var selectPanel = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(9, 5, 9, 3) };
             selectPanel.Controls.Add(MakeButton("전체 선택", delegate { SetAllChecked(true); }, 100));
             selectPanel.Controls.Add(MakeButton("전체 해제", delegate { SetAllChecked(false); }, 100));
+            var saveButton = MakeButton("기본저장", SaveAiDefaults, 110);
+            saveButton.Dock = DockStyle.Right;
+            var saveHolder = new Panel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(0, 5, 13, 3) };
+            saveHolder.Controls.Add(selectPanel);
+            saveHolder.Controls.Add(saveButton);
+            selectPanel.Dock = DockStyle.Fill;
 
             var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, Padding = new Padding(10, 10, 10, 8), FlowDirection = FlowDirection.LeftToRight };
             runButton.Text = "선택 폴더 실행 + 전체화면 자동배치";
@@ -142,7 +173,7 @@ namespace GitFolderBashLauncher
             listContainer.Controls.Add(folders);
 
             Controls.Add(listContainer);
-            Controls.Add(selectPanel);
+            Controls.Add(saveHolder);
             Controls.Add(pathPanel);
             Controls.Add(title);
             Controls.Add(status);
@@ -157,14 +188,60 @@ namespace GitFolderBashLauncher
             return button;
         }
 
-        private string SettingsFile
+        private string SettingsFolder
         {
             get
             {
                 string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GitFolderBashLauncher");
                 Directory.CreateDirectory(folder);
-                return Path.Combine(folder, "root.txt");
+                return folder;
             }
+        }
+
+        private string SettingsFile { get { return Path.Combine(SettingsFolder, "root.txt"); } }
+        private string AiSettingsFile { get { return Path.Combine(SettingsFolder, "ai.txt"); } }
+
+        private Dictionary<string, string> LoadAiChoices()
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(AiSettingsFile)) return result;
+                foreach (string line in File.ReadAllLines(AiSettingsFile, Encoding.UTF8))
+                {
+                    int separator = line.LastIndexOf('=');
+                    if (separator <= 0) continue;
+                    string tool = line.Substring(separator + 1).Trim();
+                    if (AiTools.Contains(tool)) result[line.Substring(0, separator)] = tool;
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        private void SaveAiDefaults(object sender, EventArgs e)
+        {
+            folders.EndEdit();
+            if (SaveAiChoices())
+                status.Text = string.Format("AI 선택값 {0}개를 저장했습니다. 다음 실행 때 이 값으로 표시됩니다.", folders.Rows.Count);
+            else
+                MessageBox.Show("AI 선택값을 저장하지 못했습니다.", "저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private bool SaveAiChoices()
+        {
+            var choices = LoadAiChoices();
+            foreach (DataGridViewRow row in folders.Rows)
+            {
+                var item = (FolderItem)row.Tag;
+                choices[item.FullPath] = (string)row.Cells["Ai"].Value;
+            }
+            try
+            {
+                File.WriteAllLines(AiSettingsFile, choices.Select(p => p.Key + "=" + p.Value).ToArray(), new UTF8Encoding(false));
+                return true;
+            }
+            catch { return false; }
         }
 
         private string LoadRootPath()
@@ -203,7 +280,7 @@ namespace GitFolderBashLauncher
         private void LoadFolders()
         {
             string root = rootPath.Text.Trim();
-            folders.Items.Clear();
+            folders.Rows.Clear();
             if (!Directory.Exists(root))
             {
                 status.Text = "폴더를 찾을 수 없습니다: " + root;
@@ -215,7 +292,15 @@ namespace GitFolderBashLauncher
                 var directories = Directory.GetDirectories(root)
                     .OrderBy(p => Path.GetFileName(p), StringComparer.CurrentCultureIgnoreCase)
                     .ToArray();
-                foreach (string path in directories) folders.Items.Add(new FolderItem(path), false);
+                var aiChoices = LoadAiChoices();
+                foreach (string path in directories)
+                {
+                    var item = new FolderItem(path);
+                    string ai;
+                    if (!aiChoices.TryGetValue(path, out ai)) ai = AiTools[0];
+                    int index = folders.Rows.Add(false, item.ToString(), ai);
+                    folders.Rows[index].Tag = item;
+                }
                 SaveRootPath();
                 status.Text = string.Format("{0}에서 하위 폴더 {1}개를 찾았습니다.", root, directories.Length);
             }
@@ -227,20 +312,25 @@ namespace GitFolderBashLauncher
 
         private void SetAllChecked(bool value)
         {
-            for (int i = 0; i < folders.Items.Count; i++) folders.SetItemChecked(i, value);
+            folders.EndEdit();
+            foreach (DataGridViewRow row in folders.Rows) row.Cells["Run"].Value = value;
         }
 
         private void RunSelected(object sender, EventArgs e)
         {
-            var selected = folders.CheckedItems.Cast<FolderItem>().ToList();
+            folders.EndEdit();
+            var selected = folders.Rows.Cast<DataGridViewRow>()
+                .Where(r => r.Cells["Run"].Value is bool && (bool)r.Cells["Run"].Value)
+                .Select(r => new { Folder = (FolderItem)r.Tag, Ai = (string)r.Cells["Ai"].Value })
+                .ToList();
             if (selected.Count == 0)
             {
                 MessageBox.Show("실행할 폴더를 한 개 이상 체크해 주세요.", "선택 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (!File.Exists(DefaultGitBash))
+            if (!File.Exists(Mintty))
             {
-                MessageBox.Show("Git Bash 실행 파일을 찾지 못했습니다.\r\n" + DefaultGitBash, "Git Bash 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Git Bash 터미널(mintty)을 찾지 못했습니다.\r\n" + Mintty, "Git Bash 없음", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -250,11 +340,16 @@ namespace GitFolderBashLauncher
             {
                 for (int i = 0; i < selected.Count; i++)
                 {
-                    status.Text = string.Format("Git Bash 실행 중 ({0}/{1}): {2}", i + 1, selected.Count, selected[i].Name);
+                    string title = selected[i].Folder.Name + "  |  " + selected[i].Ai;
+                    status.Text = string.Format("Git Bash + {0} 실행 중 ({1}/{2}): {3}", selected[i].Ai, i + 1, selected.Count, selected[i].Folder.Name);
                     Application.DoEvents();
-                    IntPtr window = LaunchBashAndFindWindow(selected[i].FullPath);
-                    if (window != IntPtr.Zero) launchedWindows.Add(window);
+                    IntPtr window = LaunchBashAndFindWindow(selected[i].Folder.FullPath, selected[i].Ai, title);
+                    if (window == IntPtr.Zero) continue;
+                    launchedWindows.Add(window);
+                    lockedTitles[window] = title;
                 }
+                EnforceTitles();
+                titleTimer.Enabled = lockedTitles.Count > 0;
                 ArrangeInGrid(launchedWindows);
                 status.Text = string.Format("완료: 선택 {0}개 중 {1}개 창을 화면에 자동 배치했습니다.", selected.Count, launchedWindows.Count);
                 if (launchedWindows.Count < selected.Count)
@@ -268,15 +363,28 @@ namespace GitFolderBashLauncher
             }
         }
 
-        private IntPtr LaunchBashAndFindWindow(string workingDirectory)
+        private IntPtr LaunchBashAndFindWindow(string workingDirectory, string aiTool, string title)
         {
             var before = new HashSet<IntPtr>(WindowCatalog.GetVisibleWindows().Select(w => w.Handle));
             try
             {
-                Process.Start(new ProcessStartInfo(DefaultGitBash) {
+                // git-bash.exe 대신 mintty를 직접 실행해야 창 제목과 시작 명령을 지정할 수 있다.
+                // AI 종료 후에도 창이 닫히지 않도록 일반 Bash로 이어서 실행한다.
+                string command = aiTool + "; exec bash --login -i";
+                var startInfo = new ProcessStartInfo(Mintty) {
+                    Arguments = string.Join(" ", new[] {
+                        "-i", Quote(DefaultGitBash),
+                        "-o", "AppID=GitForWindows.Bash",
+                        "-t", Quote(title),
+                        "/usr/bin/bash", "--login", "-i", "-c", Quote(command)
+                    }),
                     WorkingDirectory = workingDirectory,
-                    UseShellExecute = true
-                });
+                    UseShellExecute = false
+                };
+                startInfo.EnvironmentVariables["MSYSTEM"] = "MINGW64";
+                startInfo.EnvironmentVariables["CHERE_INVOKING"] = "1";
+                startInfo.EnvironmentVariables["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1";
+                Process.Start(startInfo);
             }
             catch { return IntPtr.Zero; }
 
@@ -292,6 +400,28 @@ namespace GitFolderBashLauncher
                 if (added != null) return added.Handle;
             }
             return IntPtr.Zero;
+        }
+
+        private static string Quote(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+
+        // Bash 프롬프트나 AI가 창 제목을 바꿔도 "폴더 | AI" 제목으로 되돌린다 (이 프로그램이 열려 있는 동안).
+        private void EnforceTitles()
+        {
+            foreach (var pair in lockedTitles.ToList())
+            {
+                if (!NativeMethods.IsWindow(pair.Key))
+                {
+                    lockedTitles.Remove(pair.Key);
+                    continue;
+                }
+                var current = new StringBuilder(1024);
+                NativeMethods.GetWindowText(pair.Key, current, current.Capacity);
+                if (current.ToString() != pair.Value) NativeMethods.SetWindowText(pair.Key, pair.Value);
+            }
+            if (lockedTitles.Count == 0) titleTimer.Enabled = false;
         }
 
         private void ArrangeInGrid(List<IntPtr> windows)
