@@ -88,102 +88,148 @@ namespace GitFolderBashLauncher
         private const string Mintty = @"C:\Program Files\Git\usr\bin\mintty.exe";
         private static readonly string[] AiTools = { "claude", "codex" };
 
+        private static readonly Color PageColor = Color.FromArgb(243, 244, 246);
+        private static readonly Color BorderColor = Color.FromArgb(218, 222, 228);
+        private static readonly Color MutedColor = Color.FromArgb(100, 108, 120);
+        private static readonly Color AccentColor = Color.FromArgb(37, 99, 235);
+        private static readonly Color CheckedRowColor = Color.FromArgb(232, 240, 254);
+
         private readonly TextBox rootPath = new TextBox();
-        private readonly DataGridView folders = new DataGridView();
+        private readonly FlowLayoutPanel list = new FlowLayoutPanel();
+        private readonly List<FolderRow> rows = new List<FolderRow>();
         private readonly Label status = new Label();
-        private readonly Button runButton = new Button();
+        private readonly Label selectedCount = new Label();
+        private readonly Button runButton;
         private readonly Dictionary<IntPtr, string> lockedTitles = new Dictionary<IntPtr, string>();
         private readonly System.Windows.Forms.Timer titleTimer = new System.Windows.Forms.Timer { Interval = 700 };
+        private readonly float scale = 1f;
 
         internal MainForm()
         {
+            // 프로세스가 DPI 인식 상태라 글꼴(pt)만 배율대로 커진다. 픽셀 값은 S()로 직접 배율을 곱한다.
+            using (Graphics g = CreateGraphics()) scale = g.DpiX / 96f;
+
             Text = "Git 폴더 Bash 자동배치";
+            AutoScaleMode = AutoScaleMode.None;
             StartPosition = FormStartPosition.CenterScreen;
-            Width = 760;
-            Height = 620;
-            MinimumSize = new Size(620, 460);
-            Font = new Font("Malgun Gothic", 9F);
+            Font = new Font("Malgun Gothic", 10.5F);
+            BackColor = PageColor;
+            Rectangle screen = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Size = new Size(Math.Min(S(920), screen.Width * 9 / 10), Math.Min(S(760), screen.Height * 9 / 10));
+            MinimumSize = new Size(Math.Min(S(700), screen.Width), Math.Min(S(520), screen.Height));
 
-            var title = new Label {
-                Dock = DockStyle.Top,
-                Height = 72,
-                Padding = new Padding(14, 12, 14, 0),
-                Font = new Font("Malgun Gothic", 11F, FontStyle.Bold),
-                Text = "실행할 Git 작업 폴더와 AI(claude / codex)를 선택하세요.\r\n선택한 폴더마다 Git Bash에서 AI를 실행하고 화면 전체에 자동 배치합니다."
-            };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(S(20), S(16), S(20), S(16)) };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            var pathPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 48, ColumnCount = 4, Padding = new Padding(10, 7, 10, 5) };
-            pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
-            pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
-            pathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
-            pathPanel.Controls.Add(new Label { Text = "Git 폴더", TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, 0);
-            rootPath.Dock = DockStyle.Fill;
+            // 제목
+            var header = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(0, 0, 0, S(14)) };
+            header.Controls.Add(new Label { AutoSize = true, Margin = new Padding(0), Text = "Git 폴더 Bash 자동배치", Font = new Font("Malgun Gothic", 16F, FontStyle.Bold) });
+            header.Controls.Add(new Label {
+                AutoSize = true, Margin = new Padding(0, S(4), 0, 0), ForeColor = MutedColor,
+                Text = "실행할 폴더를 체크하고 폴더마다 AI(claude / codex)를 고르세요.\r\n선택한 폴더마다 Git Bash에서 AI를 실행하고 화면에 자동 배치합니다."
+            });
+            layout.Controls.Add(header, 0, 0);
+
+            // Git 상위 폴더 경로
+            var pathRow = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, 0, 0, S(10)) };
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pathRow.Controls.Add(new Label { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0), Text = "Git 폴더", Font = new Font(Font, FontStyle.Bold) }, 0, 0);
+            rootPath.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            rootPath.Margin = new Padding(0, 0, S(8), 0);
             rootPath.Text = LoadRootPath();
-            pathPanel.Controls.Add(rootPath, 1, 0);
-            pathPanel.Controls.Add(MakeButton("찾아보기", BrowseFolder), 2, 0);
-            pathPanel.Controls.Add(MakeButton("새로고침", delegate { LoadFolders(); }), 3, 0);
-
-            folders.Dock = DockStyle.Fill;
-            folders.BorderStyle = BorderStyle.FixedSingle;
-            folders.BackgroundColor = SystemColors.Window;
-            folders.AllowUserToAddRows = false;
-            folders.AllowUserToDeleteRows = false;
-            folders.AllowUserToResizeRows = false;
-            folders.RowHeadersVisible = false;
-            folders.SelectionMode = DataGridViewSelectionMode.CellSelect;
-            folders.EditMode = DataGridViewEditMode.EditOnEnter;
-            folders.RowTemplate.Height = 28;
-            folders.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Run", HeaderText = "실행", Width = 48 });
-            folders.Columns.Add(new DataGridViewTextBoxColumn { Name = "Folder", HeaderText = "폴더", ReadOnly = true, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
-            var aiColumn = new DataGridViewComboBoxColumn { Name = "Ai", HeaderText = "AI", Width = 110, FlatStyle = FlatStyle.Flat };
-            aiColumn.Items.AddRange(AiTools);
-            folders.Columns.Add(aiColumn);
-            folders.CurrentCellDirtyStateChanged += delegate
+            rootPath.KeyDown += delegate(object sender, KeyEventArgs e)
             {
-                if (folders.IsCurrentCellDirty) folders.CommitEdit(DataGridViewDataErrorContexts.Commit);
+                if (e.KeyCode != Keys.Enter) return;
+                e.SuppressKeyPress = true;
+                LoadFolders();
             };
-            titleTimer.Tick += delegate { EnforceTitles(); };
+            pathRow.Controls.Add(rootPath, 1, 0);
+            pathRow.Controls.Add(MakeButton("찾아보기", BrowseFolder), 2, 0);
+            pathRow.Controls.Add(MakeButton("새로고침", delegate { LoadFolders(); }), 3, 0);
+            layout.Controls.Add(pathRow, 0, 1);
 
-            var selectPanel = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(9, 5, 9, 3) };
-            selectPanel.Controls.Add(MakeButton("전체 선택", delegate { SetAllChecked(true); }, 100));
-            selectPanel.Controls.Add(MakeButton("전체 해제", delegate { SetAllChecked(false); }, 100));
-            var saveButton = MakeButton("기본저장", SaveAiDefaults, 110);
-            saveButton.Dock = DockStyle.Right;
-            var saveHolder = new Panel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(0, 5, 13, 3) };
-            saveHolder.Controls.Add(selectPanel);
-            saveHolder.Controls.Add(saveButton);
-            selectPanel.Dock = DockStyle.Fill;
+            // 목록 위 도구 모음
+            var toolbar = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = new Padding(0, 0, 0, S(8)) };
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            toolbar.Controls.Add(MakeButton("전체 선택", delegate { SetAllChecked(true); }), 0, 0);
+            toolbar.Controls.Add(MakeButton("전체 해제", delegate { SetAllChecked(false); }), 1, 0);
+            selectedCount.AutoSize = true;
+            selectedCount.Anchor = AnchorStyles.Left;
+            selectedCount.ForeColor = MutedColor;
+            selectedCount.Margin = new Padding(S(8), 0, 0, 0);
+            toolbar.Controls.Add(selectedCount, 2, 0);
+            toolbar.Controls.Add(MakeButton("AI 선택 기본저장", SaveAiDefaults), 3, 0);
+            layout.Controls.Add(toolbar, 0, 2);
 
-            var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, Padding = new Padding(10, 10, 10, 8), FlowDirection = FlowDirection.LeftToRight };
-            runButton.Text = "선택 폴더 실행 + 전체화면 자동배치";
-            runButton.Width = 285;
-            runButton.Height = 36;
-            runButton.Font = new Font("Malgun Gothic", 9F, FontStyle.Bold);
-            runButton.Click += RunSelected;
-            bottom.Controls.Add(runButton);
-            bottom.Controls.Add(MakeButton("바탕화면 아이콘 만들기", CreateDesktopShortcut, 190, 36));
+            // 폴더 목록 (1px 테두리 안에 스크롤 목록)
+            var listBorder = new Panel { Dock = DockStyle.Fill, BackColor = BorderColor, Padding = new Padding(1), Margin = new Padding(0, 0, 0, S(12)) };
+            list.Dock = DockStyle.Fill;
+            list.FlowDirection = FlowDirection.TopDown;
+            list.WrapContents = false;
+            list.AutoScroll = true;
+            list.BackColor = Color.White;
+            list.ClientSizeChanged += delegate { FitRowWidths(); };
+            listBorder.Controls.Add(list);
+            layout.Controls.Add(listBorder, 0, 3);
 
-            status.Dock = DockStyle.Bottom;
-            status.Height = 38;
-            status.Padding = new Padding(13, 8, 13, 0);
+            // 상태 표시 + 실행 버튼
+            var footer = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0) };
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            status.AutoSize = false;
+            status.AutoEllipsis = true;
+            status.Dock = DockStyle.Fill;
+            status.TextAlign = ContentAlignment.MiddleLeft;
+            status.ForeColor = MutedColor;
+            status.Margin = new Padding(0, 0, S(12), 0);
             status.Text = "폴더를 읽는 중입니다...";
+            footer.Controls.Add(status, 0, 0);
+            footer.Controls.Add(MakeButton("바탕화면 아이콘 만들기", CreateDesktopShortcut), 1, 0);
+            runButton = MakeButton("선택 폴더 실행 + 전체화면 자동배치", RunSelected, true);
+            footer.Controls.Add(runButton, 2, 0);
+            layout.Controls.Add(footer, 0, 4);
 
-            var listContainer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 6) };
-            listContainer.Controls.Add(folders);
-
-            Controls.Add(listContainer);
-            Controls.Add(saveHolder);
-            Controls.Add(pathPanel);
-            Controls.Add(title);
-            Controls.Add(status);
-            Controls.Add(bottom);
+            Controls.Add(layout);
+            AcceptButton = runButton;
+            titleTimer.Tick += delegate { EnforceTitles(); };
             Shown += delegate { LoadFolders(); };
         }
 
-        private Button MakeButton(string text, EventHandler handler, int width = 80, int height = 28)
+        private int S(int value)
         {
-            var button = new Button { Text = text, Width = width, Height = height, Margin = new Padding(4, 0, 4, 0) };
+            return (int)Math.Round(value * scale);
+        }
+
+        private Button MakeButton(string text, EventHandler handler, bool primary = false)
+        {
+            var button = new Button {
+                Text = text,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(S(12), S(5), S(12), S(5)),
+                Margin = new Padding(S(6), 0, 0, 0),
+                FlatStyle = FlatStyle.Flat,
+                UseVisualStyleBackColor = false,
+                BackColor = primary ? AccentColor : Color.White,
+                ForeColor = primary ? Color.White : Color.FromArgb(31, 41, 55),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.None
+            };
+            if (primary) button.Font = new Font(Font, FontStyle.Bold);
+            button.FlatAppearance.BorderColor = primary ? AccentColor : BorderColor;
+            button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(29, 78, 216) : Color.FromArgb(243, 246, 250);
             button.Click += handler;
             return button;
         }
@@ -221,9 +267,8 @@ namespace GitFolderBashLauncher
 
         private void SaveAiDefaults(object sender, EventArgs e)
         {
-            folders.EndEdit();
             if (SaveAiChoices())
-                status.Text = string.Format("AI 선택값 {0}개를 저장했습니다. 다음 실행 때 이 값으로 표시됩니다.", folders.Rows.Count);
+                status.Text = string.Format("AI 선택값 {0}개를 저장했습니다. 다음 실행 때 이 값으로 표시됩니다.", rows.Count);
             else
                 MessageBox.Show("AI 선택값을 저장하지 못했습니다.", "저장 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -231,11 +276,7 @@ namespace GitFolderBashLauncher
         private bool SaveAiChoices()
         {
             var choices = LoadAiChoices();
-            foreach (DataGridViewRow row in folders.Rows)
-            {
-                var item = (FolderItem)row.Tag;
-                choices[item.FullPath] = (string)row.Cells["Ai"].Value;
-            }
+            foreach (FolderRow row in rows) choices[row.Item.FullPath] = row.SelectedAi;
             try
             {
                 File.WriteAllLines(AiSettingsFile, choices.Select(p => p.Key + "=" + p.Value).ToArray(), new UTF8Encoding(false));
@@ -280,10 +321,13 @@ namespace GitFolderBashLauncher
         private void LoadFolders()
         {
             string root = rootPath.Text.Trim();
-            folders.Rows.Clear();
+            // 새로고침해도 체크해 둔 폴더는 유지한다.
+            var wasChecked = new HashSet<string>(rows.Where(r => r.Check.Checked).Select(r => r.Item.FullPath), StringComparer.OrdinalIgnoreCase);
+            ClearRows();
             if (!Directory.Exists(root))
             {
                 status.Text = "폴더를 찾을 수 없습니다: " + root;
+                UpdateSelectedCount();
                 return;
             }
 
@@ -293,35 +337,118 @@ namespace GitFolderBashLauncher
                     .OrderBy(p => Path.GetFileName(p), StringComparer.CurrentCultureIgnoreCase)
                     .ToArray();
                 var aiChoices = LoadAiChoices();
+                list.SuspendLayout();
                 foreach (string path in directories)
                 {
-                    var item = new FolderItem(path);
                     string ai;
                     if (!aiChoices.TryGetValue(path, out ai)) ai = AiTools[0];
-                    int index = folders.Rows.Add(false, item.ToString(), ai);
-                    folders.Rows[index].Tag = item;
+                    var row = CreateRow(new FolderItem(path), ai, wasChecked.Contains(path));
+                    rows.Add(row);
+                    list.Controls.Add(row.Panel);
                 }
+                list.ResumeLayout();
+                FitRowWidths();
                 SaveRootPath();
                 status.Text = string.Format("{0}에서 하위 폴더 {1}개를 찾았습니다.", root, directories.Length);
             }
             catch (Exception ex)
             {
+                list.ResumeLayout();
                 status.Text = "폴더를 읽지 못했습니다: " + ex.Message;
             }
+            UpdateSelectedCount();
+        }
+
+        private void ClearRows()
+        {
+            list.SuspendLayout();
+            list.Controls.Clear();
+            foreach (FolderRow row in rows) row.Panel.Dispose();
+            rows.Clear();
+            list.ResumeLayout();
+        }
+
+        // 한 줄: [체크] 폴더명 | 전체 경로 | AI 선택. 줄 아무 곳이나 클릭해도 체크가 바뀐다.
+        private FolderRow CreateRow(FolderItem item, string ai, bool isChecked)
+        {
+            var row = new FolderRow { Item = item };
+            var panel = new TableLayoutPanel {
+                ColumnCount = 4, RowCount = 1,
+                Margin = new Padding(0),
+                Padding = new Padding(S(12), 0, S(12), 1),
+                BackColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, S(140)));
+
+            var check = new CheckBox { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(10), 0), Checked = isChecked };
+            var name = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Text = item.Name, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0) };
+            var path = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Text = item.FullPath, ForeColor = MutedColor, Margin = new Padding(S(8), 0, S(8), 0) };
+            var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0), Cursor = Cursors.Default };
+            combo.Items.AddRange(AiTools);
+            combo.SelectedItem = ai;
+            // 목록 스크롤 중 마우스 휠로 AI 값이 바뀌지 않게 하고, 대신 목록을 스크롤한다.
+            combo.MouseWheel += delegate(object sender, MouseEventArgs e)
+            {
+                ((HandledMouseEventArgs)e).Handled = true;
+                if (combo.DroppedDown) return;
+                list.AutoScrollPosition = new Point(0, Math.Max(0, -list.AutoScrollPosition.Y - e.Delta));
+            };
+
+            EventHandler toggle = delegate { check.Checked = !check.Checked; };
+            panel.Click += toggle;
+            name.Click += toggle;
+            path.Click += toggle;
+            check.CheckedChanged += delegate
+            {
+                panel.BackColor = check.Checked ? CheckedRowColor : Color.White;
+                UpdateSelectedCount();
+            };
+            panel.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                using (var pen = new Pen(Color.FromArgb(236, 238, 241)))
+                    e.Graphics.DrawLine(pen, 0, panel.Height - 1, panel.Width, panel.Height - 1);
+            };
+
+            panel.Controls.Add(check, 0, 0);
+            panel.Controls.Add(name, 1, 0);
+            panel.Controls.Add(path, 2, 0);
+            panel.Controls.Add(combo, 3, 0);
+            panel.Height = Math.Max(S(44), combo.PreferredHeight + S(14));
+            panel.BackColor = isChecked ? CheckedRowColor : Color.White;
+
+            row.Panel = panel;
+            row.Check = check;
+            row.Ai = combo;
+            return row;
+        }
+
+        private void FitRowWidths()
+        {
+            int width = list.ClientSize.Width;
+            if (width <= 0) return;
+            list.SuspendLayout();
+            foreach (FolderRow row in rows) row.Panel.Width = width;
+            list.ResumeLayout();
+        }
+
+        private void UpdateSelectedCount()
+        {
+            selectedCount.Text = string.Format("선택 {0} / {1}", rows.Count(r => r.Check.Checked), rows.Count);
         }
 
         private void SetAllChecked(bool value)
         {
-            folders.EndEdit();
-            foreach (DataGridViewRow row in folders.Rows) row.Cells["Run"].Value = value;
+            foreach (FolderRow row in rows) row.Check.Checked = value;
         }
 
         private void RunSelected(object sender, EventArgs e)
         {
-            folders.EndEdit();
-            var selected = folders.Rows.Cast<DataGridViewRow>()
-                .Where(r => r.Cells["Run"].Value is bool && (bool)r.Cells["Run"].Value)
-                .Select(r => new { Folder = (FolderItem)r.Tag, Ai = (string)r.Cells["Ai"].Value })
+            var selected = rows.Where(r => r.Check.Checked)
+                .Select(r => new { Folder = r.Item, Ai = r.SelectedAi })
                 .ToList();
             if (selected.Count == 0)
             {
@@ -429,8 +556,8 @@ namespace GitFolderBashLauncher
             int count = windows.Count;
             if (count == 0) return;
             Rectangle area = Screen.PrimaryScreen.WorkingArea;
-            double aspect = (double)area.Width / Math.Max(1, area.Height);
-            int columns = Math.Max(1, Math.Min(count, (int)Math.Round(Math.Sqrt(count * aspect))));
+            // 1개: 전체, 2개: 좌우, 3~4개: 2열, 5~9개: 3열 (README 배치 예시와 동일)
+            int columns = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(count)));
             int rows = (int)Math.Ceiling((double)count / columns);
 
             for (int i = 0; i < count; i++)
@@ -478,7 +605,15 @@ namespace GitFolderBashLauncher
             internal readonly string FullPath;
             internal string Name { get { return Path.GetFileName(FullPath); } }
             internal FolderItem(string path) { FullPath = path; }
-            public override string ToString() { return Name + "    (" + FullPath + ")"; }
+        }
+
+        private sealed class FolderRow
+        {
+            internal FolderItem Item;
+            internal TableLayoutPanel Panel;
+            internal CheckBox Check;
+            internal ComboBox Ai;
+            internal string SelectedAi { get { return (string)Ai.SelectedItem ?? AiTools[0]; } }
         }
     }
 
