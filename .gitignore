@@ -1,0 +1,6 @@
+*.lnk
+*.new.exe
+*.pdb
+*.user
+bin/
+obj/
